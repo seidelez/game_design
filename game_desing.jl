@@ -157,7 +157,7 @@ function payout_g(member::Member, rec::REC)
     end
 
     model, var_member = optimal_response(rec, member)
-    set_silent(model)
+    #set_silent(model)
     optimize!(model)
     results_summary(model, rec, member, var_member)
 
