@@ -26,7 +26,7 @@ end
 
 function optimal_response(rec::REC, member::Member, model=0, type = "v2")
 
-    optimizer = SCIP.Optimizer
+    optimizer = Gurobi.Optimizer
     if isa(model, Int)       
         model = Model(optimizer)
     end
