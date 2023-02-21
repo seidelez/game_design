@@ -67,7 +67,7 @@ function empty_BESS()
    return BESS(0, 0, 0)
 end
 
-function set_load(rec::REC)
+function set_load_fix(rec::REC)
     total_load = 0*rec.members[1].flex_load 
     for member in rec.members
         total_load .+=  max.(0, member.P_fix)
@@ -77,20 +77,20 @@ function set_load(rec::REC)
 end
 
 function Set_total_load(rec::REC)
-    total_load = 0*rec.members[1].flex_load 
+    total_load = 0*rec.load_fix
     for member in rec.members
-        total_load .+=  max.(0, member.flex_load)
+        total_load .+=  max.(member.flex_load, 0)
     end
-    rec.load_virtual = max.(0,total_load)
+    rec.load_virtual = total_load + rec.load_fix
     return total_load
 end
 
 function Set_total_power(rec::REC)
-    power_res = rec.power_fix
+    power_res = zeros(T)
     for member in rec.members
         power_res .+= max.(-member.flex_load, 0)
     end
-    rec.power_virtual = power_res
+    rec.power_virtual = power_res + rec.power_fix
     return power_res
 end
 
@@ -107,6 +107,27 @@ function rebuild_rec(var_rec::Var_REC)
     end
     rec.members = members
     return rec
+end
+
+function display_rec(rec::REC)
+    Power = Set_total_power(rec) + rec.load_fix
+    Load = Set_total_load(rec)
+    SE = min.(Load, Power)
+    for member in rec.members
+    end
+end
+
+function NE_check(rec::REC)
+    for member in rec.members
+        load_saved = model.flex_load
+        model, var_member = optimal_response(rec, member)
+        set_silent(model)
+        optimize!(model)
+        if norm(load_saved - value.(var_member.P)) > 0.001
+            return false
+        end
+    end
+    return true
 end
 
 function rec_error(rec1::REC, rec2::REC)

@@ -219,25 +219,49 @@ function best_response_i(member, rec, payout = "proportional")
     end
 end
 
-function best_response_dynamics(rec, type ="proportional")
-    n_iter = 5
+function best_response_dynamics(rec, type ="proportional", upload = false, learning_rate = 0.5)
+    n_iter = 20
     error = Vector{Float64}(undef, n_iter)
     for i in 1:n_iter
         rec_t = deepcopy(rec)
-        #new_members = []
+        new_members = []
         for member in rec.members
-
+            saved_load = member.flex_load
             member.flex_load = 0*member.flex_load
             Set_total_load(rec)
             Set_total_power(rec)
             model, var_member = best_response_i(member, rec, type)
-            member.flex_load = value.(var_member.P)
-            #push!(new_members, member)
+            if upload
+                member.flex_load = learning_rate*value.(var_member.P) + (1-learning_rate)*saved_load
+            else
+                new_member = deepcopy(member)
+                new_member.flex_load = learning_rate*value.(var_member.P) + (1-learning_rate)*saved_load
+                push!(new_members, new_member)
+            end
         end
-        
+
+        if !upload
+            rec.members = new_members
+        end 
         error[i] = rec_error(rec_t, rec)
     end
     return error
+end
+
+function upload_rec(rec::REC)
+    n_iter = 10
+    n_iter_member = 10
+
+    for i in n_iter
+        for member in rec.members
+            for j in n_iter_member
+                model, g = update_member(rec, member)
+            end
+
+            println("flex_load ", member.flex_load)
+            println("incentive ", g)
+        end
+    end
 end
 
 function results_summary(model, rec, member, var_member)
@@ -256,13 +280,12 @@ function results_summary(model, rec, member, var_member)
     println( "costs ", sum(-lambda_buy.*P_plus + lambda_sell.*P_minus) )
     println( "G_plus ", value.(var_member.g_plus)*lambda_prem)
     println( "G_minus ", value.(var_member.g_minus)*lambda_prem)
-    member.flex_load = value.(var_member.P)
     
-    println("member ", member.flex_load)
+    println("member ", value.(var_member.P))
     println("p plus ", value.(var_member.P_plus))
     println("p minus ", value.(var_member.P_minus))
-    println("sum ", sum(member.flex_load))
-    println("fraction ", member.flex_load[12]/member.flex_load[11])
+    println("SE incentives ", sum(value.(var_member.g_plus + var_member.g_minus)*lambda_prem))
+    println("Costs ", sum(value.(var_member.P).*lambda_pun))
 end
 
 members = []
@@ -289,11 +312,11 @@ for i in 1:length(power)
 end
 
 println("power", power)
-lambda_prem = 1
+lambda_prem =   1
 load = 10*rand(Float64, T)
 rec = REC(members, power, power, load, load, lambda_pun, lambda_prem)
-set_load(rec)
 Set_total_load(rec)
+Set_total_power(rec)
 println("load", rec.load_virtual)
 println("P_res", rec.power_virtual)
 

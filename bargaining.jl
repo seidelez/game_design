@@ -29,7 +29,7 @@ end
 
 function optimal_response(rec::REC, member::Member, model=0, type = "v2")
 
-    optimizer = SCIP.Optimizer
+    optimizer = Ipopt.Optimizer
     if isa(model, Int)       
         model = Model(optimizer)
     end
@@ -43,9 +43,8 @@ function optimal_response(rec::REC, member::Member, model=0, type = "v2")
     @variable(model, 0 <= P_plus[1:T] <= member.P_max)
     @variable(model, -member.P_max <= P_minus[1:T] <= 0)
 
-    @variable(model, SE_plus[1:T] )
-    @variable(model, SE_minus[1:T] )
-    SE_without_i = min(rec.power_fix + rec.power_virtual, rec.load_virtual)
+    @variable(model, SE[1:T] )
+    SE_without_i = min(rec.power_virtual, rec.load_virtual)
     @variable(model, 0 <= g_plus[1:T] )
     @variable(model, 0 <= g_minus[1:T] )
 
@@ -54,10 +53,8 @@ function optimal_response(rec::REC, member::Member, model=0, type = "v2")
     @constraint(model, [i=1:T], P[i] >= P_minus[i])
     @NLconstraint(model, [i=1:T], P_plus[i]*P_minus[i] >= 0)
 
-    @constraint(model, [i=1:T], SE_plus[i] <= P_plus[i] + rec.load_virtual[i])
-    @constraint(model, [i=1:T], SE_minus[i] <= P_minus[i] + rec.power_virtual[i])
-    @constraint(model, [i=1:T], SE_plus[i] <= rec.power_virtual[i] )
-    @constraint(model, [i=1:T], SE_minus[i] <= rec.load_virtual[i] )
+    @constraint(model, [i=1:T], SE[i] <= P_plus[i] + rec.load_virtual[i])
+    @constraint(model, [i=1:T], SE[i] <= -P_minus[i] + rec.power_virtual[i] )
 
     #WE ADD CONSTRAINTS RELATIVE TO THE FLEXIBILITY
     P_flexmax = min(member.P_max, member.flex_load_max)
@@ -69,21 +66,23 @@ function optimal_response(rec::REC, member::Member, model=0, type = "v2")
     if member.BESS.P_max != 0
         #eta = member.BESS.eta 
         eta = 0.9 
-        @variable(model, u_bess[1:T], Bin)
         @variable(model, -member.BESS.P_max <= P_bess[1:T] <= member.BESS.P_max)
         @variable(model, 0 <= SOC[1:T] <= member.BESS.SOC_max)
-        @variable(model, 0 <= P_bess_plus[1:T] <= member.BESS.P_max*u_bess[i])
+        @variable(model, 0 <= P_bess_plus[1:T] <= member.BESS.P_max)
         @variable(model, -member.BESS.P_max <= P_bess_minus[1:T] <= 0 )
+        @NLconstraint(model, [i=1:T], P_bess_plus[i]*P_bess_minus[i] >= 0)
 
-        @constraint(model, [i=1:T], P_bess_plus[i] <= member.BESS.P_max*u_bess[i])
-        @constraint(model, [i=1:T], (-1+u_bess[i])*member.BESS.P_max <= P_bess_minus[i] )
+
+        #@constraint(model, [i=1:T], P_bess_plus[i] <= member.BESS.P_max*u_bess[i])
+        #@constraint(model, [i=1:T], (-1+u_bess[i])*member.BESS.P_max <= P_bess_minus[i] )
 
         @constraint(model, [i=1:T], P_bess[i] == P_bess_plus[i] + P_bess_minus[i])
         @constraint(model, [i=1:T], P_bess[i] <= P_bess_plus[i])
         @constraint(model, [i=1:T], P_bess[i] >= P_bess_minus[i])
 
         @constraint(model, [i=1:(T-1)], SOC[i+1] == SOC[i] + eta*P_bess_plus[i] + P_bess_minus[i]/eta)
-        @constraint(model, SOC[1] == 0)
+        @constraint(model, SOC[1] == member.BESS.SOC_max)
+        @constraint(model, SOC[T] >= 0.8*SOC[1])
 
     end
 
@@ -101,11 +100,11 @@ function optimal_response(rec::REC, member::Member, model=0, type = "v2")
 
     for i in 1:T    
         @constraint(model, g_plus[i] <= P_plus[i] )
-        @constraint(model, g_minus[i] <= P_minus[i] )
+        @constraint(model, g_minus[i] <= -P_minus[i] )
 
-        SE_contribution  = SE_plus
+        SE_contribution  = SE
         if type =="v3"
-            SE_contribution = SE_plus - SE_without_i
+            SE_contribution = SE - SE_without_i
         end
         if rec.load_virtual[i] > eps
             @NLconstraint(model, g_plus[i]*(P_plus[i] + rec.load_virtual[i]) <= ( SE_contribution[i] )*P_plus[i]) 
@@ -114,19 +113,16 @@ function optimal_response(rec::REC, member::Member, model=0, type = "v2")
         end
 
 
-        SE_contribution  = SE_minus
+        SE_contribution  = SE
         if type =="v3"
-            SE_contribution = SE_minus - SE_without_i
+            SE_contribution = SE - SE_without_i
         end
         if rec.power_virtual[i] > eps
-            @NLconstraint(model, g_minus[i]*(P_minus[i] + rec.power_virtual[i] ) <=  ( SE_contribution[i] )*P_minus[i]) 
+            @NLconstraint(model, g_minus[i]*(-P_minus[i] + rec.power_virtual[i] ) <=  ( SE_contribution[i] )*(-P_minus[i])) 
         else
             @constraint(model, g_minus[i] <= ( SE_contribution[i] ) )
         end
-        if rec.load_virtual[i] < eps && rec.power_virtual[i] < eps
-            @constraint(model, g_plus[i] <= 0 )
-            @constraint(model, g_minus[i] <= 0 )
-        end
+        
     end
 
     SE_incentive =  (sum(g_plus) + sum(g_minus))*lambda_prem
@@ -138,7 +134,10 @@ function optimal_response(rec::REC, member::Member, model=0, type = "v2")
     if member.BESS.P_max !=0
         cost += sum( lambda_pun.*P_bess )
     end 
-    @NLobjective(model, Max, SE_incentive - cost)
+
+    regularizer = sum(P[i]^2 for i=1:T)
+    regularizer = 0
+    @NLobjective(model, Max, SE_incentive - cost + regularizer)
     var_member = Variable_Member(member, P, P_plus, P_minus, g_plus, g_minus)
     if member.BESS.P_max !=0
         var_member = Variable_Member(member, P, P_plus, P_minus, g_plus, g_minus)
