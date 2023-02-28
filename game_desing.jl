@@ -219,8 +219,8 @@ function best_response_i(member, rec, payout = "proportional")
     end
 end
 
-function best_response_dynamics(rec, type ="proportional", upload = false, learning_rate = 0.5)
-    n_iter = 20
+function best_response_dynamics(rec, type ="proportional", upload = true, learning_rate = 1)
+    n_iter = 30
     error = Vector{Float64}(undef, n_iter)
     for i in 1:n_iter
         rec_t = deepcopy(rec)
@@ -323,22 +323,16 @@ println("P_res", rec.power_virtual)
 #BESTRESPONSEDYNAMICS
 type = "proportional"
 type = "no"
+
 error = best_response_dynamics(rec, type)
 println("error ", error)
 
-println("load last", rec.load_virtual)
-Set_total_load(rec)
-println("load last", rec.load_virtual)
-p1 = Plots.plot(1:T, rec.load_virtual, title="Load")
-display(p1)
-println("P_res", rec.power_virtual)
-p2 = Plots.plot(1:T, rec.power_virtual, title="Power")
-display(p2)
-p3 = Plots.plot(1:T, [member.flex_load  for member in rec.members], title = "flex load" )
-display(p3)
+display_rec(rec)
 display_rec_load(rec)
 
-model, var_rec = optimal_centralised(rec)
-optimize!(model)
-
-
+"""model, rec_centralised = optimal_centralised(rec)
+Set_total_load(rec_centralised)
+Set_total_power(rec_centralised)
+PoA = rec_revenue(rec) - rec_revenue(rec_centralised)
+println("PoA ", PoA)
+"""

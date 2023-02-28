@@ -110,11 +110,18 @@ function rebuild_rec(var_rec::Var_REC)
 end
 
 function display_rec(rec::REC)
-    Power = Set_total_power(rec) + rec.load_fix
+    Power = Set_total_power(rec) 
     Load = Set_total_load(rec)
     SE = min.(Load, Power)
-    for member in rec.members
-    end
+    println("load last", rec.load_virtual)
+    p1 = Plots.plot(1:T, rec.load_virtual, label ="Load")
+    println("P_res", rec.power_virtual)
+    Plots.plot!(p1, 1:T, rec.power_virtual, label = " Power")
+    Plots.plot!(p1, 1:T, SE)
+    display(p1)
+
+    p1 = Plots.plot!( 1:T, [member.flex_load  for member in rec.members], label = "flex load" )
+    display(p1)
 end
 
 function NE_check(rec::REC)
@@ -132,10 +139,29 @@ end
 
 function rec_error(rec1::REC, rec2::REC)
     res = 0
+    function g(rec)
+        P = rec.power_virtual
+        L = rec.load_virtual
+        K1 = min.(L , P)
+        K2 = min.(L , P)
+        SE = min.(L , P)
+
+        res = sum(SE)*rec2.lambda_prem - sum(L.*rec2.lambda_pun)
+        return res
+    end
+
+
     for (i,member) in enumerate(rec1.members)
         v = rec1.members[i].flex_load - rec2.members[i].flex_load
         res +=  LinearAlgebra.norm(v)
     end
+
+    res = g(rec2)
     return res
+end
+
+function rec_revene(rec)
+    SE = min.(rec.load_virtual, rec.power_virtual)
+    revenue = rec.lambda_prem*sum(SE) - sum(rec.load_virtual.*rec.lambda_pun) 
 end
 
