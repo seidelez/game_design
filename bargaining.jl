@@ -11,8 +11,8 @@ using Roots
 using Convex
 include("User.jl")
 include("proximal_gradient_descent.jl")
-T= 24
 
+T = 24
 #MINLP branch
 
 function display_rec_load(rec)
@@ -27,7 +27,20 @@ function display_rec_load(rec)
 
 end
 
-function optimal_response(rec::REC, member::Member, model=0, type = "v2")
+function SE_payout(rec::REC, g_plus, g_minus, SE)
+    return (rec.alpha*(sum(g_plus)) + (1-rec.alpha)*(sum(g_minus)))*rec.lambda_prem
+end
+
+function SE_equal(rec::REC, g_plus, g_minus, SE)
+    return rec.alpha*sum(SE)*rec.lambda_prem/length(rec.members)
+end
+
+function optimal_response(rec::REC, member::Member, model=0, payout = SE_payout, type = "v2")
+
+    P_last = member.flex_load 
+    member.flex_load = 0*member.flex_load
+    Set_total_load(rec)
+    Set_total_power(rec)
 
     optimizer = Ipopt.Optimizer
     if isa(model, Int)       
@@ -45,6 +58,7 @@ function optimal_response(rec::REC, member::Member, model=0, type = "v2")
 
     @variable(model, SE[1:T] )
     SE_without_i = min(rec.power_virtual, rec.load_virtual)
+    D = rec.power_virtual - rec.load_virtual
     @variable(model, 0 <= g_plus[1:T] )
     @variable(model, 0 <= g_minus[1:T] )
 
@@ -54,9 +68,10 @@ function optimal_response(rec::REC, member::Member, model=0, type = "v2")
     @NLconstraint(model, [i=1:T], P_plus[i]*P_minus[i] >= 0)
 
     @constraint(model, [i=1:T], SE[i] <= P_plus[i] + rec.load_virtual[i])
-    @constraint(model, [i=1:T], SE[i] <= -P_minus[i] + rec.power_virtual[i] )
+    @constraint(model, [i=1:T], SE[i] <= rec.power_virtual[i] )
 
     #WE ADD CONSTRAINTS RELATIVE TO THE FLEXIBILITY
+    P_flexmax = min(member.P_max, member.flex_load_max)
     P_flexmax = min(member.P_max, member.flex_load_max)
     @variable(model, -P_flexmax <= P_flex[1:T] <= P_flexmax)
     @constraint(model, [i = 1:T], member.P_fix[i] + P_flex[i] >= 0)
@@ -90,42 +105,61 @@ function optimal_response(rec::REC, member::Member, model=0, type = "v2")
         @constraint(model, [i=1:T], P[i] == P_bess[i] + P_flex[i] + member.P_fix[i])
     elseif P_flexmax != 0 
         @constraint(model, [i=1:T], P[i] == P_flex[i] + member.P_fix[i])
-    else
+    elseif member.BESS.P_max != 0
         @constraint(model, [i=1:T], P[i] == P_bess[i] + member.P_fix[i])
+    else
+        @constraint(model, [i=1:T], P[i] == member.P_fix[i])
     end
 
     #WE DEFINE OBJECTIVE CONSTRAINTS
     eps =  0.05
 
-    beta_over_0 = true
+    beta_over_0 = false
+    @variable(model, 0 <= beta_plus[1:T] <= 1)
+    @variable(model, 0 <= beta_minus[1:T] <= 1)
+
     for i in 1:T    
         @constraint(model, g_plus[i] <= P_plus[i] )
         @constraint(model, g_minus[i] <= -P_minus[i] )
 
-        SE_contribution  = SE
-        if type =="v3"
-            SE_contribution = SE - SE_without_i
+        if beta_over_0
+            @constraint(model, beta_plus[i] + beta_minus[i] >= 0.0)
         end
+
+        SE_contribution  = SE
+        if rec.payout =="marginal"
+            SE_contribution = SE - SE_without_i
+            @NLconstraint(model, g_plus[i] <= ( SE_contribution[i] )) 
+            @NLconstraint(model, g_minus[i] <= ( SE_contribution[i] )) 
+        else
+            @NLconstraint(model, g_plus[i] <= ( SE_contribution[i] )*beta_plus[i]) 
+            @NLconstraint(model, g_minus[i] <= ( SE_contribution[i] )*beta_minus[i]) 
+        end
+
         if rec.load_virtual[i] > eps
-            @NLconstraint(model, g_plus[i]*(P_plus[i] + rec.load_virtual[i]) <= ( SE_contribution[i] )*P_plus[i]) 
-        else
-            @NLconstraint(model, g_plus[i] <= (SE_contribution[i]) )
+            @NLconstraint(model, beta_plus[i]*(rec.load_virtual[i] + P_plus[i]) <= P_plus[i]) 
+            if rec.payout == "penalty"
+                @NLconstraint(model, beta_plus[i]*(rec.load_virtual[i] + P_plus[i]) <= P_plus[i]) 
+            end
+        elseif !beta_over_0
+            @NLconstraint(model, beta_plus[i] <= 1 )
         end
 
-
-        SE_contribution  = SE
-        if type =="v3"
-            SE_contribution = SE - SE_without_i
-        end
+        @NLconstraint(model, g_minus[i] <= ( SE_contribution[i] )*beta_minus[i]) 
         if rec.power_virtual[i] > eps
-            @NLconstraint(model, g_minus[i]*(-P_minus[i] + rec.power_virtual[i] ) <=  ( SE_contribution[i] )*(-P_minus[i])) 
-        else
-            @constraint(model, g_minus[i] <= ( SE_contribution[i] ) )
+            @NLconstraint(model, beta_minus[i]*(rec.power_virtual[i] - P_minus[i]) <=  -P_minus[i]) 
+        elseif !beta_over_0
+            @constraint(model, beta_minus[i] <= 1 )
         end
         
     end
 
-    SE_incentive =  (sum(g_plus) + sum(g_minus))*lambda_prem
+    SE_incentive =  payout(rec, g_plus, g_minus, SE)
+    if payout == "shared"
+        SE_incentive = SE_equal(rec, g_plus, g_minus, SE)
+    elseif payout == "marginal"
+        SE_incentive = rec.lambda_prem*sum(SE - SE_without_i)
+    end
 
     cost = 0
     if member.flex_load_max != 0
@@ -135,20 +169,19 @@ function optimal_response(rec::REC, member::Member, model=0, type = "v2")
         cost += sum( lambda_pun.*P_bess )
     end 
 
-    regularizer = 0.001*sum(P[i]^2 for i=1:T)
-    #regularizer = 0
+    #regularizer = 0.01*sum((P[i]-P_last[i])^2 for i=1:T)
+    regularizer = 0
     @NLobjective(model, Max, SE_incentive - cost + regularizer)
     var_member = Variable_Member(member, P, P_plus, P_minus, g_plus, g_minus)
     if member.BESS.P_max !=0
         var_member = Variable_Member(member, P, P_plus, P_minus, g_plus, g_minus)
     end
-
     return (model, var_member)
 end
 
 
 function optimal_centralised(rec::REC)
-    model = Model(Gurobi.Optimizer)
+    model = Model(Ipopt.Optimizer)
     var_members = []
 
     #WE DEFINE THE VARIABLES
@@ -156,6 +189,12 @@ function optimal_centralised(rec::REC)
     @variable(model, 0 <= P_shared[1:T] )
 
     for member in rec.members
+        P_flexmax = max(member.BESS.P_max, member.flex_load_max)
+        if P_flexmax == 0
+            var_member = Variable_Member(member, member.P_fix, max.(0,member.P_fix), min.(0,member.P_fix), 0, 0)
+            push!(var_members, var_member)
+            continue
+        end
         P =       @variable(model, [1:T], lower_bound=0, upper_bound=member.BESS.P_max)
         P_flex  = @variable(model, [1:T], lower_bound=-member.BESS.P_max, upper_bound=member.BESS.P_max)
         @constraint(model, [i=1:T], P_flex[i] + member.P_fix[i] >= 0)
@@ -227,7 +266,7 @@ function disagreement_payout(rec::REC, member::Member)
         end
     end
 
-    rec_minus_member = REC([member], rec.power_virtual, rec.load_virtual-member.flex_load, lambda_pun, 0)
+    rec_minus_member = REC([member], rec.payout, rec.configuration, rec.power_virtual, rec.load_virtual-member.flex_load, lambda_pun, rec.lambda_prem, rec.alpha)
     result_rec = optimal_centralised(rec_minus_member)
 
     return result_rec, result_member
@@ -235,7 +274,7 @@ end
 
 function wardrop_eq(rec::REC)
     A, b =  build_coupled_constraints(rec)
-    extended_rec = Extended_REC(A, b, rec)
+    # = Extended_REC(A, b, rec)
 
     #Initialization
     tau = 1
@@ -251,17 +290,27 @@ function wardrop_eq(rec::REC)
 
 
     while eps1 > 0.01 && k < K
+        rec_copy1 = deepcopy(rec)
         eps2=1
         while eps2 > 0.01 && h < H
 
+            rec_copy2 = deepcopy(rec)
             #x_i_h+1 = BestResponse(X_i_h, lambda_h)
             #Inner loop until xonvergence
             for member in rec.members
                 model, var_member = optimal_response(rec, member)
                 original_objective = objective_function(model)
 
-                x = stacked_var(model, var_member)
-                N = size(A)[2]/len(rec.members)
+                num_variables = 5
+                @variable(model, x_i_stacked[1:T*num_variables])
+                for t = 1:T
+                    @constraint(model, x_i_stacked[1 + (t-1)*num_variables] == var_member.P[t])
+                    @constraint(model, x_i_stacked[2 + (t-1)*num_variables] == var_member.P_plus[t])
+                    @constraint(model, x_i_stacked[3 + (t-1)*num_variables] == var_member.P_minus[t])
+                    @constraint(model, x_i_stacked[4 + (t-1)*num_variables] == var_member.g_plus[t])
+                    @constraint(model, x_i_stacked[5 + (t-1)*num_variables] == var_member.g_minus[t])
+                end
+                
                 start = N*(member.ID - 1) +1
                 A_i = A[:, start:start+N]
 
@@ -277,6 +326,8 @@ function wardrop_eq(rec::REC)
             z = (1-1/h)*z + 1/h*(sigma)
             rec.load_virtual = z
             h += 1
+
+            eps2 = rec_error(rec, rec_copy2)[1]
         end
 
 
@@ -285,6 +336,8 @@ function wardrop_eq(rec::REC)
         dual_var = dual_var - tau*(b-A*x)
         dual_var = max.(0, dual_var)
         k = k+1
+
+        eps1 = rec_error(rec, rec_copy1)[1]
     end
 end
 
@@ -293,47 +346,42 @@ function build_coupled_constraints(rec::REC)
     n = length(rec.members)
     n_dimension = 5
     k = n_dimension*T  
-    n_constraints = 2*m
+
     m_bis = k*length(rec.members)  
-    m = k*length(rec.members) + T 
+    m = k*length(rec.members)  
 
     v_power = zeros(T, m)
     v_load = zeros(T, m)
 
     for t = 1:T
         for n_i = 1:n
-            v_power[t, n*((t-1)*n_dimension) + (n_i-1)*n_dimension + 2] = 1
-            v_load[t, n*((t-1)*n_dimension) + (n_i-1)*n_dimension + 3] = 1
+            v_load[t, n*((t-1)*n_dimension) + (n_i-1)*n_dimension + 2] = 1
+            v_power[t, n*((t-1)*n_dimension) + (n_i-1)*n_dimension + 3] = 1
         end
     end
 
     #A and b define the constraints Ax >= b
-    A = Matrix{Float64}(undef, 0, m)
-    b = Vector{Float64}(undef, 0)
+    A = zeros(1, m)
+    b = zeros(1)
     for (n_i, member) in enumerate(rec.members)
         for t = 1:T
             #A_i = Matrix{Float64}(undef, 0)
             b_i = zeros(4)
 
-            A_sumload = v_load[t]
-            A_sumpower = v_power[t]
-            A_loadcont = v_load[t]
-            A_powercont = v_power[t]
+            A_sumload = v_load[t,:]
+            A_sumpower = v_power[t,:]
+            A_loadcont = v_load[t,:]
+            A_powercont = v_power[t,:]
 
             A_sumload[n*((t-1)*n_dimension) + (n_i-1)*n_dimension + 2] = 1
             A_sumpower[n*((t-1)*n_dimension) + (n_i-1)*n_dimension + 3] = 1
-            A_loadcont[n*((t-1)*n_dimension) + (n_i-1)*n_dimension + 4] = 1
-            A_powercont[n*((t-1)*n_dimension) + (n_i-1)*n_dimension + 5] = 1
+            A_loadcont[n*((t-1)*n_dimension) + (n_i-1)*n_dimension + 2] = 1
+            A_powercont[n*((t-1)*n_dimension) + (n_i-1)*n_dimension + 3] = 1
 
-            A_sumload[m_bis + t] = -1
-            A_sumpower[m_bis + t] = -1
-            A_loadcont[n*((t-1)*n_dimension) + (n_i-1)*n_dimension + 4] = 1
-            A_powercont[n*((t-1)*n_dimension) + (n_i-1)*n_dimension + 5] = 1
-
-            vcat(A, A_sumload)
-            vcat(A, A_sumpower)
-            vcat(A, A_loadcont)
-            vcat(A, A_powercont)
+            vcat(A, A_sumload')
+            vcat(A, A_sumpower')
+            vcat(A, A_loadcont')
+            vcat(A, A_powercont')
 
             vcat(b, b_i)
         end
@@ -341,6 +389,3 @@ function build_coupled_constraints(rec::REC)
 
     return A, b
 end
-
-members = []
-T = 24

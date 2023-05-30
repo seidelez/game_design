@@ -30,6 +30,7 @@ end
 mutable struct BESS
     SOC_0
     SOC_max
+    SOC
     P_max 
 end
 
@@ -41,12 +42,15 @@ end
 
 mutable struct REC
     members
+    payout 
+    configuration
     power_fix
     power_virtual
     load_fix
     load_virtual
     lambda_pun
     lambda_prem
+    alpha
 end
 
 mutable struct Var_REC
@@ -63,8 +67,63 @@ struct coupled_constraint
     n_members
 end
 
+T=24
+
+function set_SOC(member::Member)
+    SOC = member.BESS.SOC_0*ones(T)
+
+    if member.BESS.P_max == 0
+        return
+    end
+
+    eta = 1
+    for i in 1:(T-1)
+        SOC[i+1] = SOC[i] + eta*max(0, member.flex_load[i]) + min(0, member.flex_load[i])/eta
+    end
+    member.BESS.SOC = SOC
+end
+
 function empty_BESS()
-   return BESS(0, 0, 0)
+   return BESS(0, 0, zeros(T), 0)
+end
+
+function g(rec::REC)
+    res = 0
+    Set_total_load(rec)
+    Set_total_power(rec)
+    P = rec.power_virtual
+    L = rec.load_virtual
+    if rec.configuration == "charge only"
+        L = rec.power_fix
+    end
+    SE = min.(L , P)
+    res = sum(SE)*rec.lambda_prem - sum((P-L).*rec.lambda_pun)
+    return res
+end
+
+function g_member(rec::REC, member::Member)
+    x_delta = deepcopy(member.flex_load)
+    x_plus = max.(0, x_delta)
+    x_minus = min.(0, x_delta)
+    
+    P = rec.power_virtual
+    L = rec.load_virtual 
+    SE = min.(L , P)
+
+    res_plus = x_plus.*SE./(L)
+    res_minus = (-x_minus).*SE./(P)
+    for i = 1:T
+        if L[i] == 0
+            res_plus[i] = 0
+        end
+        if P[i] == 0
+            res_minus[i] = 0
+        end
+    end
+    
+    res = sum(rec.alpha*res_plus + (1-rec.alpha)*res_minus)*rec.lambda_prem - sum(x_delta.*rec.lambda_pun) 
+
+    return res
 end
 
 function set_load_fix(rec::REC)
@@ -88,7 +147,11 @@ end
 function Set_total_power(rec::REC)
     power_res = zeros(T)
     for member in rec.members
-        power_res .+= max.(-member.flex_load, 0)
+        power_res_sum = max.(-member.flex_load, 0)
+        if rec.configuration == "charge only" && member.BESS.Pmax == 0
+            power_res_sum = 0*power_res_sum
+        end
+        power_res .+= power_res_sum
     end
     rec.power_virtual = power_res + rec.power_fix
     return power_res
@@ -125,43 +188,124 @@ function display_rec(rec::REC)
 end
 
 function NE_check(rec::REC)
+    res = true
     for member in rec.members
-        load_saved = model.flex_load
+        load_saved = deepcopy(member.flex_load)
         model, var_member = optimal_response(rec, member)
         set_silent(model)
         optimize!(model)
-        if norm(load_saved - value.(var_member.P)) > 0.001
-            return false
+        if objective_value(model) > g_member(rec, member) 
+            res = false
+        end
+        member.flex_load = load_saved
+    end
+    return res
+end
+
+function rec_error(rec1::REC, rec2::REC)
+
+    res = 0
+
+    for (i,member) in enumerate(rec1.members)
+
+        v1 = rec1.members[i].flex_load 
+        v2 = rec2.members[i].flex_load 
+        v = v1-v2
+
+        #println("v1 ", rec1.members[i].flex_load)
+        #println("v2 ", rec2.members[i].flex_load)
+        println("norm ", LinearAlgebra.norm(v1-v2))
+        res +=  LinearAlgebra.norm(v)
+    end
+
+    #res = g(rec2)
+    return res, rec_revenue(rec2), V(rec2), NE_check(rec2), is_local_maxima(rec2)
+end
+
+function rec_revenue(rec)
+    SE = min.(rec.load_virtual, rec.power_virtual)
+    revenue = rec.lambda_prem*sum(SE) 
+    revenue_SE = rec.lambda_prem*sum(SE) 
+    cost = sum(rec.load_virtual.*rec.lambda_pun) 
+    gain = sum(rec.power_virtual.*rec.lambda_pun)
+    TOTAL = revenue_SE + gain - cost
+    return TOTAL
+end
+
+function V(rec::REC)
+    SE = min.(rec.load_virtual, rec.power_virtual)
+    revenue = rec.lambda_prem*sum(SE) 
+    revenue_SE = rec.lambda_prem*sum(SE) 
+    cost = sum(rec.load_virtual.*rec.lambda_pun) 
+    gain = sum(rec.power_virtual.*rec.lambda_pun)
+
+    if rec.payout == "proportional"
+        SE_param = 0.5
+    elseif rec.payout == "marginal"
+        SE_param = 1
+    elseif rec.payout == "shared"
+        SE_param = 1/N
+    else
+        SE_param = 1 
+    end
+    TOTAL = SE_param*revenue_SE + gain - cost
+    return TOTAL
+end
+
+function rec_desglose(rec)
+    Set_total_load(rec)
+    Set_total_power(rec)
+    SE = min.(rec.load_virtual, rec.power_virtual)
+    revenue_SE = rec.lambda_prem*sum(SE) 
+    cost = sum(rec.load_virtual.*rec.lambda_pun) 
+    gain = sum(rec.power_virtual.*rec.lambda_pun)
+    println(" SE ", revenue_SE, " cost ", cost, " gain ", gain, " TOTAL ", revenue_SE + gain - cost)
+end
+
+function is_local_maxima(rec::REC)
+    eps = 0.001
+    res = g(rec)
+    for t in 1:T
+        for member in rec.members
+            save_x = deepcopy(member.flex_load)
+            member.flex_load[t] += eps
+            if is_feasible(member)
+                if g(rec) > res
+                    return false
+                end
+            end
+
+            t = int(t)
+            member.flex_load[t] = save_x
+            member.flex_load[t] -= eps
+            if is_feasible(member)
+                if g(rec) > res
+                    return false
+                end
+            end
+
+            member.flex_load[t] = save_x
+
         end
     end
     return true
 end
 
-function rec_error(rec1::REC, rec2::REC)
-    res = 0
-    function g(rec)
-        P = rec.power_virtual
-        L = rec.load_virtual
-        K1 = min.(L , P)
-        K2 = min.(L , P)
-        SE = min.(L , P)
-
-        res = sum(SE)*rec2.lambda_prem - sum(L.*rec2.lambda_pun)
-        return res
+function is_feasible(member::Member)
+    for t = 1:T
+        if member.BESS.P_max != 0
+            set_SOC(member)
+            if member.flex_load[t] > member.BESS.P_max || member.flex_load[t] < -member.BESS.P_max || 
+             member.SOC[t] > member.SOC_max || member.SOC[t] < 0 || 
+             member.SOC[0] != member.SOC_0 || member.SOC[T] >= 0.8*member.SOC_0 
+                return false
+            end
+        else
+            if member.flex_load[t] > member.BESS.P_max || member.flex_load[t] < 0 || 
+                sum(member.P_fix - member.flex_load) > member.flex_load_max 
+                return false
+            end
+        end
     end
-
-
-    for (i,member) in enumerate(rec1.members)
-        v = rec1.members[i].flex_load - rec2.members[i].flex_load
-        res +=  LinearAlgebra.norm(v)
-    end
-
-    res = g(rec2)
-    return res
+    return true
 end
-
-function rec_revene(rec)
-    SE = min.(rec.load_virtual, rec.power_virtual)
-    revenue = rec.lambda_prem*sum(SE) - sum(rec.load_virtual.*rec.lambda_pun) 
-end
-

@@ -8,12 +8,14 @@ using Plots, PlotlyJS
 using LinearAlgebra
 using Roots
 using Printf
+using JLD2
 include("User.jl")
 include("bargaining.jl")
 include("proximal_gradient_descent.jl")
 include("import_data.jl")
+include("lyapunov.jl")
 
-Base.show(io::IO, f::Float64) = @printf(io, "%1.2f", f)
+Base.show(io::IO, f::Float64) = @printf(io, "%1.3f", f)
 
 function display_rec_load(rec)
     df = DataFrame(timestep=Float64[], ID=Float64[], load=Float64[])
@@ -26,8 +28,6 @@ function display_rec_load(rec)
     display(p)
 
 end
-
-
 
 #Payout Function for individual player for strategy s_i
 function payout_proportional(member, rec)
@@ -219,23 +219,57 @@ function best_response_i(member, rec, payout = "proportional")
     end
 end
 
-function best_response_dynamics(rec, type ="proportional", upload = true, learning_rate = 1)
-    n_iter = 30
-    error = Vector{Float64}(undef, n_iter)
+function best_response_dynamics(rec, bess ="separated", upload = true, learning_rate = 0.3)
+    n_iter = 10
+    error = []
     for i in 1:n_iter
         rec_t = deepcopy(rec)
         new_members = []
         for member in rec.members
-            saved_load = member.flex_load
-            member.flex_load = 0*member.flex_load
-            Set_total_load(rec)
-            Set_total_power(rec)
-            model, var_member = best_response_i(member, rec, type)
+            saved_load = deepcopy(member.flex_load)
+            aux_load = deepcopy(member.flex_load)
+            model, var_member = optimal_response(rec, member)
+            
+
+            if bess == "separated" && member.BESS.P_max!=0
+
+                model_plus, var_member_plus = optimal_response(rec, member)
+                @constraint(model_plus, [i=1:T], var_member_plus.P_minus[i] == min(0, aux_load[i]) )
+                set_silent(model_plus)
+                optimize!(model_plus)
+
+                for i in 1:T
+                    if aux_load[i] >= 0 
+                        aux_load[i] = value(var_member_plus.P_plus[i])
+                    end
+                end
+
+                model_minus, var_member_minus = optimal_response(rec, member) 
+                @constraint(model_minus, [i=1:T], var_member_minus.P_plus[i] == max(0, aux_load[i]) )
+                set_silent(model_minus)
+                optimize!(model_minus)
+
+                for i in 1:T
+                    if aux_load[i] <= 0 
+                        aux_load[i] = value(var_member_minus.P_minus[i])
+                    end
+                end
+                
+                results_summary(model_minus, rec, member, var_member_minus)
+                P_new = aux_load
+                model = model_plus
+            else
+                set_silent(model)
+                optimize!(model)
+                results_summary(model, rec, member, var_member)
+                P_new = value.(var_member.P)
+            end
+
             if upload
-                member.flex_load = learning_rate*value.(var_member.P) + (1-learning_rate)*saved_load
+                member.flex_load = learning_rate*P_new + (1-learning_rate)*saved_load
             else
                 new_member = deepcopy(member)
-                new_member.flex_load = learning_rate*value.(var_member.P) + (1-learning_rate)*saved_load
+                new_member.flex_load = learning_rate*P_new + (1-learning_rate)*saved_load
                 push!(new_members, new_member)
             end
         end
@@ -243,7 +277,7 @@ function best_response_dynamics(rec, type ="proportional", upload = true, learni
         if !upload
             rec.members = new_members
         end 
-        error[i] = rec_error(rec_t, rec)
+        push!(error,rec_error(rec_t, rec))
     end
     return error
 end
@@ -265,19 +299,20 @@ function upload_rec(rec::REC)
 end
 
 function results_summary(model, rec, member, var_member)
-    lambda_sell = rec.lambda_pun
-    lambda_buy = member.lambda_tarif
-    println()
+    lambda_pun = rec.lambda_pun
     if member.BESS.SOC_max != 0
         println("STORAGE")
     end
-    println( "obj value ", objective_value(model) )
-    println( "model is ", termination_status(model) )
+
+    if !isa(model, Int)       
+        println( "obj value ", objective_value(model) )
+        println( "model is ", termination_status(model) )
+    end
     println( "Total Load ", rec.load_virtual )
     println( "Total power ", rec.power_virtual )
     P_plus = max.(value.(var_member.P), 0)
     P_minus = max.(-value.(var_member.P), 0)
-    println( "costs ", sum(-lambda_buy.*P_plus + lambda_sell.*P_minus) )
+    println( "costs ", sum(lambda_pun.*var_member.P) )
     println( "G_plus ", value.(var_member.g_plus)*lambda_prem)
     println( "G_minus ", value.(var_member.g_minus)*lambda_prem)
     
@@ -290,31 +325,67 @@ end
 
 members = []
 T = 24
-Pmax = 8
-print(lambda_pun)
-for i in 1:3
-    if i <= 2
+Pmax = 5
+SOC_max = 2*Pmax
+lambda_pun = lambda_pun[1:T]
+lambda_prem = 0.03
+println("lambda_pun ", lambda_pun)
+println("lambda_prem ", lambda_prem)
+for i in 1:6
+    if i <= 4
         bess = empty_BESS()
-        new_member = Member(i, 3*ones(T), zeros(T), 5*Pmax, Pmax, lambda_pun, bess)
+        P_fix = 3*ones(T)
+        new_member = Member(i, P_fix, P_fix, 0.5*sum(P_fix), Pmax, lambda_pun, bess)
     else
-        bess = BESS(0, 10, 10)
+        bess = BESS(0, SOC_max, zeros(T), Pmax)
         new_member = Member(i, zeros(T), zeros(T), Pmax, Pmax, lambda_pun, bess)
     end
     push!(members, new_member)
 end
 
+members2 = []
+for i in 1:8
+    if i in [3,4,5,6]
+        bess = empty_BESS()
+        P_fix = 0.5*Pmax*ones(T)
+        new_member = Member(i, P_fix, P_fix, 0.3*sum(P_fix), Pmax, lambda_pun, bess)
+    elseif  i in [0] 
+        P = 5*ones(T)
+        for t = 1:T
+            if t%2 == 1 
+                P[t] = -P[t]
+            end
+        end
+        bess = BESS(0, 2*SOC_max, P, Pmax)
+        new_member = Member(i, zeros(T), 0*P, 90, 5, lambda_pun, bess)
+    else 
+        bess = empty_BESS()
+        P_fix = 5*ones(T)
+        new_member = Member(i, P_fix, P_fix, 0, Pmax, lambda_pun, bess)
+    end
+    push!(members2, new_member)
+end
+members2 = members2[1:8]
+
 power = 20*rand(Float64, T)
 for i in 1:length(power)
-    power[i] = min(i, 24-i)
+    power[i] = 3*min(i, 24-i)
     if (i <= 6) || (i>=18)
         power[i] = 0
     end
 end
 
 println("power", power)
-lambda_prem =   1
-load = 10*rand(Float64, T)
-rec = REC(members, power, power, load, load, lambda_pun, lambda_prem)
+power = power
+lambda_pun = lambda_pun
+lambda_pun[16:24] = lambda_pun[16:24]
+lambda_prem = 0.12
+lambda_prem = 0*lambda_prem
+payout = "proportional"
+configuration = "standalone"
+alpha = 0.3
+load = 5*rand(Float64, T)
+rec = REC(members2, payout, configuration, power, power, load, load, lambda_pun, lambda_prem, alpha)
 Set_total_load(rec)
 Set_total_power(rec)
 println("load", rec.load_virtual)
@@ -323,16 +394,64 @@ println("P_res", rec.power_virtual)
 #BESTRESPONSEDYNAMICS
 type = "proportional"
 type = "no"
+N = length(rec.members)
 
+rec.payout = "shared"
+print("c c",lambda_pun)
+err = 0
+for t = 1:4
+    global err = lyapunov(rec, 1)
+end
+display_rec(rec)
+display_rec_load(rec)
+println("error ", err)
+rec_desglose(rec)
+
+"""
 error = best_response_dynamics(rec, type)
+display_rec(rec)
+display_rec_load(rec)
 println("error ", error)
 
+error = best_response_dynamics(rec, type)
+display_rec(rec)
+display_rec_load(rec)
+println("error ", error)
+"""
+
+
+
+"""
+model, rec_centralised = optimal_centralised(rec)
+Set_total_load(rec_centralised)
+Set_total_power(rec_centralised)
+rec_desglose(rec_centralised)
+
+error = best_response_dynamics(rec)
+println("error ", error)
+display_rec(rec)
+display_rec_load(rec)
+rec_desglose(rec)
+
+error = best_response_dynamics(rec, type)
+display_rec(rec)
+display_rec_load(rec)
+println("error ", error)"""
+
+a = 0
+
+"""error = lyapunov(rec)
+println("error ", error)
 display_rec(rec)
 display_rec_load(rec)
 
-"""model, rec_centralised = optimal_centralised(rec)
+model, rec_centralised = optimal_centralised(rec)
 Set_total_load(rec_centralised)
 Set_total_power(rec_centralised)
 PoA = rec_revenue(rec) - rec_revenue(rec_centralised)
 println("PoA ", PoA)
+rec_desglose(rec)
+
 """
+
+
