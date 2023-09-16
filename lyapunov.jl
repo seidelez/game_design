@@ -296,6 +296,13 @@ function lyapunov(rec::REC, n_iter = 5)
             #results_summary(0, rec, member, var_member)
         end
         push!(error, rec_error(rec_2, rec))
+        equal = equal_rec(rec, rec_2)
+    
+        if equal
+            break
+        else
+            continue
+        end
     end
     return error
 end
@@ -320,5 +327,39 @@ function projection(rec::REC, member::Member)
     @NLobjective(model, Min, norm(x_projection, member.flex_load))
 
     return model
+end
+
+function displaced_lyapunov(rec::REC, n_iter =5)
+    error = []
+    rec_2 = deepcopy(rec)
+    n = 1 
+        
+    while !equal_rec(rec, rec_2) || n<n_iter
+        n += 1
+        rec_2 = deepcopy(rec)
+        lyapunov(rec)
+        candidates = border_direction(rec)
+        candidates2 = border_direction_alt1(rec)
+        candidates = vcat(candidates, candidates2)
+
+        for direction in candidates
+            rec_3 = deepcopy(rec)
+            for (i, member) in enumerate(rec_3.members)
+                member.flex_load += direction[i, :]
+            end
+
+            feasible = true
+            feasible = is_REC_feasible(rec_3)
+            if feasible && (V(rec_3) > V(rec))
+                rec = deepcopy(rec_3)
+                println("newrec!!")
+                break
+            end
+        end
+
+        push!(error, rec_error(rec_2, rec))
+    end
+
+    return error
 end
 

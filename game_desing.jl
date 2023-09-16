@@ -219,7 +219,7 @@ function best_response_i(member, rec, payout = "proportional")
     end
 end
 
-function best_response_dynamics(rec, bess ="separated", upload = true, learning_rate = 0.3)
+function best_response_dynamics(rec, bess = "joint", upload = true, learning_rate = 1, verbose = false)
     n_iter = 10
     error = []
     for i in 1:n_iter
@@ -255,13 +255,17 @@ function best_response_dynamics(rec, bess ="separated", upload = true, learning_
                     end
                 end
                 
-                results_summary(model_minus, rec, member, var_member_minus)
+                if verbose
+                    results_summary(model_minus, rec, member, var_member_minus)
+                end
                 P_new = aux_load
                 model = model_plus
             else
                 set_silent(model)
                 optimize!(model)
-                results_summary(model, rec, member, var_member)
+                if verbose
+                    esults_summary(model, rec, member, var_member)
+                end
                 P_new = value.(var_member.P)
             end
 
@@ -399,14 +403,24 @@ N = length(rec.members)
 rec.payout = "shared"
 print("c c",lambda_pun)
 err = 0
-for t = 1:4
-    global err = lyapunov(rec, 1)
-end
+err = lyapunov(rec)
 display_rec(rec)
 display_rec_load(rec)
 println("error ", err)
 rec_desglose(rec)
 
+
+err = displaced_lyapunov(rec)
+display_rec(rec)
+display_rec_load(rec)
+println("error ", err)
+rec_desglose(rec)
+
+err = hybrid_lyapunov(rec)
+display_rec(rec)
+display_rec_load(rec)
+println("error ", err)
+rec_desglose(rec)
 """
 error = best_response_dynamics(rec, type)
 display_rec(rec)

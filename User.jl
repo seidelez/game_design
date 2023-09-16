@@ -214,7 +214,7 @@ function rec_error(rec1::REC, rec2::REC)
 
         #println("v1 ", rec1.members[i].flex_load)
         #println("v2 ", rec2.members[i].flex_load)
-        println("norm ", LinearAlgebra.norm(v1-v2))
+        #println("norm ", LinearAlgebra.norm(v1-v2))
         res +=  LinearAlgebra.norm(v)
     end
 
@@ -252,6 +252,16 @@ function V(rec::REC)
     return TOTAL
 end
 
+function equal_rec(rec::REC, rec_2::REC)
+    equal = true
+    for i = 1:length(rec.members)
+        if rec.members[i].flex_load != rec_2.members[i].flex_load
+            equal = false
+        end
+    end
+    return equal
+end
+
 function rec_desglose(rec)
     Set_total_load(rec)
     Set_total_power(rec)
@@ -267,7 +277,7 @@ function is_local_maxima(rec::REC)
     res = g(rec)
     for t in 1:T
         for member in rec.members
-            save_x = deepcopy(member.flex_load)
+            save_x = deepcopy(member.flex_load)[t]
             member.flex_load[t] += eps
             if is_feasible(member)
                 if g(rec) > res
@@ -275,7 +285,6 @@ function is_local_maxima(rec::REC)
                 end
             end
 
-            t = int(t)
             member.flex_load[t] = save_x
             member.flex_load[t] -= eps
             if is_feasible(member)
@@ -308,4 +317,124 @@ function is_feasible(member::Member)
         end
     end
     return true
+end
+
+function is_REC_feasible(rec::REC)
+    for member in rec.members
+        if !is_feasible(member)
+            return false
+        end
+    end
+
+    return true
+end
+
+function border_direction(rec::REC)
+    candidates = []
+    for (i, member) in enumerate(rec.members)
+        for t = 1:T          
+            new_candidate1 = zeros(size(rec.members, 1), T)
+            new_candidate2 = zeros(size(rec.members, 1), T)  
+            if member.flex_load[t] == 0
+                new_candidate1[i, t] = 1
+                new_candidate2[i, t] = -1
+            end
+            push!(candidates, new_candidate1, new_candidate2)
+        end
+    end
+    return candidates
+end
+
+function border_direction_alt(rec::REC)
+    candidates = []
+    new_candidate = zeros(size(rec.members, 1), T)
+    eps = 10^(-3)
+    model, rec_centralised, costs = optimal_centralised(rec)
+    
+    @constraint(model, costs >= V(rec) + eps)
+    @objective(model, Max, 0)
+    set_silent(model)
+    optimize!(model)
+    println( "model is ", termination_status(model) )
+
+    if termination_status(model) != "OPTIMAL"
+        return candidates
+    end
+    
+    for (i, member) in enumerate(rec.members), t in 1:T
+        new_candidate[i] = rec_centralised.members[i].flex_load - member.flex_load
+    end
+    push!(candidates, new_candidate)
+    return candidates
+end
+
+function border_direction_alt1(rec::REC)
+    candidates = []
+    new_candidate = zeros(size(rec.members, 1), T)
+    eps = 10^(-3)
+    model, rec_centralised, costs = optimal_centralised(rec)
+    
+    @constraint(model, costs >= V(rec) + eps)
+    @objective(model, Max, 0)
+    set_silent(model)
+    optimize!(model)
+    println( "model is ", termination_status(model) )
+
+    if termination_status(model) != "OPTIMAL"
+        return candidates
+    end
+    
+    for (i, member) in enumerate(rec.members), t in 1:T
+        new_candidate[i] = rec_centralised.members[i].flex_load - member.flex_load
+    end
+    push!(candidates, new_candidate)
+    return candidates
+end
+
+function border_direction_alt2(rec::REC)
+    candidates = []
+    for (i, member) in enumerate(rec.members)
+        for constraint in vector_constraints(member)
+            if constraint[1]'*member.flex_load == constraint[2]
+                vectorized_contraint = zeros(size(rec.members, 1), T)
+                vectorized_contraint[i] = constraint[1]
+                push!(vectorized_contraint, candidates)
+            end
+        end
+    end
+
+    mean_candidate = zeros(size(rec.members, 1), T)
+    for candidate in candidates
+        mean_candidate += candidate
+    end
+
+    mean_candidate /= size(mean_candidate, 1)
+    return candidate
+end
+
+function vector_constraint(member::Member)
+    constraints = []
+    for t in 1:T
+        c1 = zeros(T)
+        c2 = zeros(T)
+        c1[t] = 1
+        c2[t] = 1
+        Pmin = -member.BESS.P_max
+        Pmax = max(member.BESS.P_max, member.P_max)
+        push!(constraints, [c1,  Pmin])
+        push!(constraints, [-c2, Pmax])
+    end
+
+    if member.BESS.P_max != 0
+        for t in 1:T
+            c1 = zeros(T)
+            c1[1:t] = ones(t)
+            push!(constraints, [c1,  -member.SOC_0])
+            push!(constraints, [-c1, -member.SOC_max + member.SOC_0])
+        end
+    else
+        c1 = ones(T)
+        push!(constraints, [c1,  sum(member.P_fix)])
+    end
+    return constraints
 end

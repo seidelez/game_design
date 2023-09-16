@@ -65,7 +65,6 @@ function optimal_response(rec::REC, member::Member, model=0, payout = SE_payout,
     @constraint(model, [i=1:T], P[i] == P_plus[i] + P_minus[i])
     @constraint(model, [i=1:T], P[i] <= P_plus[i])
     @constraint(model, [i=1:T], P[i] >= P_minus[i])
-    @NLconstraint(model, [i=1:T], P_plus[i]*P_minus[i] >= 0)
 
     @constraint(model, [i=1:T], SE[i] <= P_plus[i] + rec.load_virtual[i])
     @constraint(model, [i=1:T], SE[i] <= rec.power_virtual[i] )
@@ -81,13 +80,12 @@ function optimal_response(rec::REC, member::Member, model=0, payout = SE_payout,
     if member.BESS.P_max != 0
         #eta = member.BESS.eta 
         eta = 0.9 
+        @NLconstraint(model, [i=1:T], P_plus[i]*P_minus[i] >= 0)
         @variable(model, -member.BESS.P_max <= P_bess[1:T] <= member.BESS.P_max)
         @variable(model, 0 <= SOC[1:T] <= member.BESS.SOC_max)
         @variable(model, 0 <= P_bess_plus[1:T] <= member.BESS.P_max)
         @variable(model, -member.BESS.P_max <= P_bess_minus[1:T] <= 0 )
         @NLconstraint(model, [i=1:T], P_bess_plus[i]*P_bess_minus[i] >= 0)
-
-
         #@constraint(model, [i=1:T], P_bess_plus[i] <= member.BESS.P_max*u_bess[i])
         #@constraint(model, [i=1:T], (-1+u_bess[i])*member.BESS.P_max <= P_bess_minus[i] )
 
@@ -188,7 +186,9 @@ function optimal_centralised(rec::REC)
     #The BESS CANT BE CHARGED from the grid
     @variable(model, 0 <= P_shared[1:T] )
 
+    c = []
     for member in rec.members
+        c_member = []
         P_flexmax = max(member.BESS.P_max, member.flex_load_max)
         if P_flexmax == 0
             var_member = Variable_Member(member, member.P_fix, max.(0,member.P_fix), min.(0,member.P_fix), 0, 0)
@@ -239,7 +239,8 @@ function optimal_centralised(rec::REC)
     for var_member in var_members
         costs = costs - sum(rec.lambda_pun.*var_member.P) 
     end
-    @objective(model, Max, rec.lambda_prem*sum(P_shared) - costs)
+    objective = rec.lambda_prem*sum(P_shared) - costs
+    @objective(model, Max, objective)
 
     rec_centralized = deepcopy(rec)
 
@@ -251,7 +252,7 @@ function optimal_centralised(rec::REC)
     for (i, member) in enumerate(rec_centralized.members)
         member.flex_load = value.(var_members[i].P)
     end
-    return model, rec_centralized
+    return model, rec_centralized, objective
 end
 
 
@@ -389,3 +390,19 @@ function build_coupled_constraints(rec::REC)
 
     return A, b
 end
+
+function hybrid_lyapunov(rec::REC, n_iter = 4)
+    error = []
+    n = 1 
+        
+    while n<n_iter
+        n += 1
+        rec_2 = deepcopy(rec)
+        lyapunov(rec)
+        best_response_dynamics(rec)
+        push!(error, rec_error(rec_2, rec))
+    end
+
+    return error
+end
+
