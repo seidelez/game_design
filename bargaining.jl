@@ -1,6 +1,7 @@
 using XLSX
 using JuMP
-using Gurobi, Ipopt, SCIP
+#using Gurobi
+using Ipopt, SCIP
 using MathOptInterface
 using CSV
 using DataFrames
@@ -35,47 +36,42 @@ function SE_equal(rec::REC, g_plus, g_minus, SE)
     return rec.alpha*sum(SE)*rec.lambda_prem/length(rec.members)
 end
 
-function optimal_response(rec::REC, member::Member, model=0, payout = SE_payout, type = "v2")
-
+function optimal_response(rec::REC, member::Member, model= 0)
     P_last = member.flex_load 
+
     member.flex_load = 0*member.flex_load
     Set_total_load(rec)
     Set_total_power(rec)
+    L = rec.load_virtual
+    P2 = rec.power_virtual
 
     optimizer = Ipopt.Optimizer
     if isa(model, Int)       
         model = Model(optimizer)
     end
-#    set_optimizer_attributes(model, "tol" => 1e-4)
-    lambda_pun = rec.lambda_pun
-    lambda_prem = rec.lambda_prem
+    #set_optimizer_attributes(model, "tol" => 1e-4)
 
     #WE DEFINE THE VARIABLES
     #The BESS CANT BE CHARGED from the grid
-    @variable(model, -member.P_max <= P[1:T] <= member.P_max)
+    @variable(model, 0 <= P[1:T] <= member.P_max)
     @variable(model, 0 <= P_plus[1:T] <= member.P_max)
     @variable(model, -member.P_max <= P_minus[1:T] <= 0)
 
     @variable(model, SE[1:T] )
-    SE_without_i = min(rec.power_virtual, rec.load_virtual)
-    D = rec.power_virtual - rec.load_virtual
+    SE_without_i = min.(rec.power_virtual, rec.load_virtual)
     @variable(model, 0 <= g_plus[1:T] )
     @variable(model, 0 <= g_minus[1:T] )
 
-    @constraint(model, [i=1:T], P[i] == P_plus[i] + P_minus[i])
-    @constraint(model, [i=1:T], P[i] <= P_plus[i])
-    @constraint(model, [i=1:T], P[i] >= P_minus[i])
-
-    @constraint(model, [i=1:T], SE[i] <= P_plus[i] + rec.load_virtual[i])
+    @constraint(model, [i=1:T], SE[i] <= P[i] + rec.load_virtual[i])
     @constraint(model, [i=1:T], SE[i] <= rec.power_virtual[i] )
 
     #WE ADD CONSTRAINTS RELATIVE TO THE FLEXIBILITY
     P_flexmax = min(member.P_max, member.flex_load_max)
-    P_flexmax = min(member.P_max, member.flex_load_max)
-    @variable(model, -P_flexmax <= P_flex[1:T] <= P_flexmax)
-    @constraint(model, [i = 1:T], member.P_fix[i] + P_flex[i] >= 0)
-    @constraint(model, sum(P_flex) == 0)
-    
+    if member.flex_load_max == 0
+        @constraint(model, P == member.P_fix)
+    else 
+        @constraint(model, sum(P) == member.flex_load_max)
+    end
     #WE ADD CONSTRAINTS RELATIVE TO THE BESS
     if member.BESS.P_max != 0
         #eta = member.BESS.eta 
@@ -98,23 +94,13 @@ function optimal_response(rec::REC, member::Member, model=0, payout = SE_payout,
         @constraint(model, SOC[T] >= 0.8*SOC[1])
 
     end
-
-    if P_flexmax != 0 && member.BESS.P_max != 0
-        @constraint(model, [i=1:T], P[i] == P_bess[i] + P_flex[i] + member.P_fix[i])
-    elseif P_flexmax != 0 
-        @constraint(model, [i=1:T], P[i] == P_flex[i] + member.P_fix[i])
-    elseif member.BESS.P_max != 0
-        @constraint(model, [i=1:T], P[i] == P_bess[i] + member.P_fix[i])
-    else
-        @constraint(model, [i=1:T], P[i] == member.P_fix[i])
-    end
-
     #WE DEFINE OBJECTIVE CONSTRAINTS
     eps =  0.05
 
     beta_over_0 = false
     @variable(model, 0 <= beta_plus[1:T] <= 1)
     @variable(model, 0 <= beta_minus[1:T] <= 1)
+    SE_contribution = SE - SE_without_i
 
     for i in 1:T    
         @constraint(model, g_plus[i] <= P_plus[i] )
@@ -152,33 +138,23 @@ function optimal_response(rec::REC, member::Member, model=0, payout = SE_payout,
         
     end
 
-    SE_incentive =  payout(rec, g_plus, g_minus, SE)
-    if payout == "shared"
-        SE_incentive = SE_equal(rec, g_plus, g_minus, SE)
-    elseif payout == "marginal"
-        SE_incentive = rec.lambda_prem*sum(SE - SE_without_i)
-    end
-
     cost = 0
-    if member.flex_load_max != 0
-        cost += sum( lambda_pun.*P_flex ) 
-    end
-    if member.BESS.P_max !=0
-        cost += sum( lambda_pun.*P_bess )
-    end 
-
-    #regularizer = 0.01*sum((P[i]-P_last[i])^2 for i=1:T)
-    regularizer = 0
-    @NLobjective(model, Max, SE_incentive - cost + regularizer)
+    SE_incentive = rec.lambda_prem.*SE - rec.lambda_prem.*SE_without_i
+    cost = sum(rec.lambda_pun.*P)
+ 
+    objective = sum(SE_incentive) - cost
+    @NLobjective(model, Max, objective)
     var_member = Variable_Member(member, P, P_plus, P_minus, g_plus, g_minus)
     if member.BESS.P_max !=0
-        var_member = Variable_Member(member, P, P_plus, P_minus, g_plus, g_minus)
+        var_member = Variable_Member(member, P, P_plus, P_minus, SE, SE_without_i)
     end
-    return (model, var_member)
+    set_silent(model)
+    optimize!(model)
+    return model, objective, var_member 
 end
 
 
-function optimal_centralised(rec::REC)
+function optimal_centralised(rec::REC,verbose = false)
     model = Model(Ipopt.Optimizer)
     var_members = []
 
@@ -186,19 +162,23 @@ function optimal_centralised(rec::REC)
     #The BESS CANT BE CHARGED from the grid
     @variable(model, 0 <= P_shared[1:T] )
 
-    c = []
     for member in rec.members
-        c_member = []
         P_flexmax = max(member.BESS.P_max, member.flex_load_max)
+        println("flexmax ", P_flexmax)
         if P_flexmax == 0
-            var_member = Variable_Member(member, member.P_fix, max.(0,member.P_fix), min.(0,member.P_fix), 0, 0)
+            var_member = Variable_Member(member, member.flex_load, max.(0,member.flex_load), min.(0,member.flex_load), 0, 0)
             push!(var_members, var_member)
             continue
         end
-        P =       @variable(model, [1:T], lower_bound=0, upper_bound=member.BESS.P_max)
-        P_flex  = @variable(model, [1:T], lower_bound=-member.BESS.P_max, upper_bound=member.BESS.P_max)
-        @constraint(model, [i=1:T], P_flex[i] + member.P_fix[i] >= 0)
-        @constraint(model, sum(P_flex) == 0)
+        P = @variable(model, [1:T], lower_bound=0, upper_bound=member.P_max)
+        #P_flex  = @variable(model, [1:T], lower_bound=-member.BESS.P_max, upper_bound=member.BESS.P_max)
+
+        if member.flex_load_max == 0
+            @constraint(model, P == member.P_fix)
+        else
+            @constraint(model, sum(P) == member.flex_load_max )
+        end
+
 
         if member.BESS.P_max != 0
             eta = 0.9
@@ -217,29 +197,30 @@ function optimal_centralised(rec::REC)
     
             @constraint(model, [i=1:T], P_bess[i] == P_bess_plus[i] + P_bess_minus[i])
             @constraint(model, [i=1:T], P_bess[i] + P_flex[i] + member.P_fix[i] == P[i])
-        else
-            @constraint(model, [i=1:T], P_flex[i] + member.P_fix[i] == P[i])
         end
 
-        var_member = Variable_Member(member, P, P, P, 0, 0)
+        var_member = Variable_Member(member, P, P, 0, 0, 0)
         push!(var_members, var_member)
     end
 
-    expr_plus = 0
-    expr_minus = 0
+    P_plus = 0
     for var_member in var_members
-        expr_plus = expr_plus .+ var_member.P_plus
-        expr_minus = expr_plus .+ var_member.P_minus
+        P_plus = P_plus .+ var_member.P_plus
     end
 
-    @constraint(model, [i=1:T], P_shared[i] <= rec.power_fix[i] + expr_minus[i] )
-    @constraint(model, [i=1:T], P_shared[i] <= expr_plus[i])
+    if false
+        @constraint(model, [i=1:T], P_shared[i] <= rec.power_virtual[i] + expr_minus[i] )
+        @constraint(model, [i=1:T], P_shared[i] <= expr_plus[i])
+    else
+        @constraint(model, [i=1:T], P_shared[i] <= rec.power_virtual[i])
+        @constraint(model, [i=1:T], P_shared[i] <= P_plus[i])
+    end
 
     costs = 0
     for var_member in var_members
         costs = costs - sum(rec.lambda_pun.*var_member.P) 
     end
-    objective = rec.lambda_prem*sum(P_shared) - costs
+    objective = rec.lambda_prem*sum(P_shared) + costs
     @objective(model, Max, objective)
 
     rec_centralized = deepcopy(rec)
@@ -247,12 +228,16 @@ function optimal_centralised(rec::REC)
     set_silent(model)
     optimize!(model)
     println( "model is ", termination_status(model) )
+    println("SE ", value.(P_shared))
+    println("P ", rec.power_virtual)
+    println("L ", value.(P_plus))
     #NO ENCUENTRA SOLUCION
 
     for (i, member) in enumerate(rec_centralized.members)
         member.flex_load = value.(var_members[i].P)
+        println("p ", member.flex_load)
     end
-    return model, rec_centralized, objective
+    return model, objective, rec, var_members
 end
 
 

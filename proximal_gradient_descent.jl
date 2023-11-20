@@ -1,5 +1,5 @@
 using JuMP
-using Gurobi
+#using Gurobi
 using CSV
 using DataFrames
 using Pkg

@@ -1,6 +1,6 @@
 using XLSX
 using JuMP
-using Gurobi
+#using Gurobi
 using CSV
 using DataFrames
 using Pkg
@@ -232,7 +232,6 @@ function best_response_dynamics(rec, bess = "joint", upload = true, learning_rat
             
 
             if bess == "separated" && member.BESS.P_max!=0
-
                 model_plus, var_member_plus = optimal_response(rec, member)
                 @constraint(model_plus, [i=1:T], var_member_plus.P_minus[i] == min(0, aux_load[i]) )
                 set_silent(model_plus)
@@ -351,12 +350,13 @@ members2 = []
 for i in 1:8
     if i in [3,4,5,6]
         bess = empty_BESS()
-        P_fix = 0.5*Pmax*ones(T)
-        new_member = Member(i, P_fix, P_fix, 0.3*sum(P_fix), Pmax, lambda_pun, bess)
+        P_fix = 0.5*Pmax*ones(T) 
+        new_member = Member(i, P_fix, P_fix, sum(P_fix), Pmax, lambda_pun, bess)
     elseif  i in [0] 
         P = 5*ones(T)
         for t = 1:T
             if t%2 == 1 
+
                 P[t] = -P[t]
             end
         end
@@ -380,92 +380,129 @@ for i in 1:length(power)
 end
 
 println("power", power)
-power = power
-lambda_pun = lambda_pun
+
+power = 2*power
+lambda_pun = 100  *lambda_pun
+
 lambda_pun[16:24] = lambda_pun[16:24]
 lambda_prem = 0.12
-lambda_prem = 0*lambda_prem
-payout = "proportional"
+lambda_prem = 1*lambda_prem
+payout = "marginal"
 configuration = "standalone"
 alpha = 0.3
-load = 5*rand(Float64, T)
-rec = REC(members2, payout, configuration, power, power, load, load, lambda_pun, lambda_prem, alpha)
+load = ones(T)
+single_update = false
+Ve = V_hybrid
+
+C = intersect_of_C([delta_feasible, delta_pos])
+g2 = sum_of_g([g_cost, g_marginal])
+dg = sum_of_dg([dg_cost, dg_marginal])
+
+
+rec = REC(members2, payout, configuration, power, power, load, load, lambda_pun, lambda_prem, alpha, g2, dg, C, Ve, single_update)
 Set_total_load(rec)
 Set_total_power(rec)
+rec_centralised = deepcopy(rec)
+rec_initial = deepcopy(rec)
 println("load", rec.load_virtual)
 println("P_res", rec.power_virtual)
+
+function reset_rec(rec::REC)
+    rec = rec_initial
+    return rec
+end
 
 #BESTRESPONSEDYNAMICS
 type = "proportional"
 type = "no"
 N = length(rec.members)
 
-rec.payout = "shared"
-print("c c",lambda_pun)
+rec.payout = "marginal"
+print("c", lambda_pun)
 err = 0
-err = lyapunov(rec)
+err, rec_timeseries = lyapunov(rec)
+rec = rec_timeseries[end]
+println("V(rec)", rec.V(rec))
 display_rec(rec)
-display_rec_load(rec)
-println("error ", err)
-rec_desglose(rec)
+display_rec_load(rec_timeseries[end])
+rec_desglose(rec_timeseries[end])
+println(" Error 1", length(err))
+println(" Error 1", err)
+
+for member in rec.members
+    for t1 in 1:T
+        for t2 in 1:T
+            if rec.dg(rec, member.ID, member.ID, t1, t2) >= 0 && delta_feasible(rec, member, t1, t2).b > 0
+                println("dg ", member.ID, ", t1 ", t1, ", t2 ", t2, " =: ", rec.dg(rec, member.ID, member.ID, t1, t2) )
+                println("delta limited " , rec.C(rec, member, t1, t2))
+                println("delta feasible ", delta_feasible(rec, member, t1, t2))
+                sum_derivs = 0
+                for (j, member2) in enumerate(rec.members)
+                    sum_derivs += rec.dg(rec, member.ID, j, t1, t2)
+                end
+                lyap_condition = (sum_derivs >= 0)
+                println("lyap ", lyap_condition)
+            end
+        end
+    end
+end
+
+model, objective, rec_centralised, var_members  = optimal_centralised(rec)
+println("V(rec)", rec.V(rec))
+println("V(rec)", rec.V(rec))
+println("Is it NE ", NE_check(rec_centralised))
+println(" Summary ", rec_desglose(rec))
+
+iter = length(rec_timeseries)
+summary = []
+g_members = zeros(iter, N)
+P_members = zeros(iter, N)
+for j in 1:iter
+    data = zeros(T, iter)
+    data_gi = zeros(length(rec.members))
+    push!(summary, err[min(length(err),j)])
+    for (i,member) in enumerate(rec_timeseries[j].members)
+        data[:,j] = member.flex_load
+        #println("flex load ", i, " iter ", j, " ", member.flex_load)
+        data_gi[i] = rec_timeseries[j].g(rec_timeseries[j], member)
+    end
+    g_members[j,:] = data_gi
+    #CSV.write("ResultsIter"*string(j)*".csv", DataFrame(data, :auto), header = false)
+end
+
+k = 2
+base = 10
+for (i,member) in enumerate(rec.members)
+    data_Pi = zeros(iter, k)
+    for j in 1:iter
+        data_Pi[j,:] = rec_timeseries[j].members[i].flex_load[base:base+k-1]
+    end
+    CSV.write("results/RP"*string(i)*".csv", DataFrame(data_Pi, :auto), header = false)
+end
+
+k = 3
+base = 10
+for (i,member) in enumerate(rec.members)
+    data_Pi = zeros(iter, k)
+    datatotal_Pi = zeros(iter, T)
+    for j in 1:iter
+        data_Pi[j,:] = rec_timeseries[j].members[i].flex_load[base:base+k-1]
+        datatotal_Pi[j,:] = rec_timeseries[j].members[i].flex_load
+    end
+    CSV.write("results/3DRP"*string(i)*".csv", DataFrame(data_Pi, :auto), header = false)
+    CSV.write("results/RPtotal"*string(i)*".csv", DataFrame(datatotal_Pi, :auto), header = false)
+end
 
 
-err = displaced_lyapunov(rec)
-display_rec(rec)
-display_rec_load(rec)
-println("error ", err)
-rec_desglose(rec)
+data_last = zeros(N,T)
 
-err = hybrid_lyapunov(rec)
-display_rec(rec)
-display_rec_load(rec)
-println("error ", err)
-rec_desglose(rec)
-"""
-error = best_response_dynamics(rec, type)
-display_rec(rec)
-display_rec_load(rec)
-println("error ", error)
+for (i, member) in enumerate(rec.members)
+    data_last[i, :] = member.flex_load
+end
 
-error = best_response_dynamics(rec, type)
-display_rec(rec)
-display_rec_load(rec)
-println("error ", error)
-"""
+CSV.write("results/P_last.csv", DataFrame(data_last, :auto), header = false)
+CSV.write("results/summary.csv", DataFrame(summary), header = ["error", "revenue", "V(x_k)", "is_NE" , "is_local_maxima"])
+CSV.write("results/g_members.csv", DataFrame(g_members, :auto), header = false)
 
-
-
-"""
-model, rec_centralised = optimal_centralised(rec)
-Set_total_load(rec_centralised)
-Set_total_power(rec_centralised)
-rec_desglose(rec_centralised)
-
-error = best_response_dynamics(rec)
-println("error ", error)
-display_rec(rec)
-display_rec_load(rec)
-rec_desglose(rec)
-
-error = best_response_dynamics(rec, type)
-display_rec(rec)
-display_rec_load(rec)
-println("error ", error)"""
-
-a = 0
-
-"""error = lyapunov(rec)
-println("error ", error)
-display_rec(rec)
-display_rec_load(rec)
-
-model, rec_centralised = optimal_centralised(rec)
-Set_total_load(rec_centralised)
-Set_total_power(rec_centralised)
-PoA = rec_revenue(rec) - rec_revenue(rec_centralised)
-println("PoA ", PoA)
-rec_desglose(rec)
-
-"""
 
 

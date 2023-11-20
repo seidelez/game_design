@@ -1,0 +1,99 @@
+\section{PERSEO}
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=1.1\textwidth,
+      height=9cm,
+      xlabel={Iteration},
+      ylabel={Pay-out Function},
+      grid=major,
+      legend pos=north west,
+      cycle list name=color list,  % Use the built-in color cycle list
+    ]
+      % Define the number of data points
+      \pgfmathtruncatemacro{\numpoints}{5} % Change this to match the number of data points
+      
+      % Use a foreach loop to plot each series with implicit time values and a custom legend entry
+      \foreach \i in {3, 4, 5} {
+        \addplot table[x expr=\coordindex, y=\i, col sep=comma, y expr=\thisrowno{\i}] {PERSEO/g_members.csv};
+        \addlegendentry{Player \i}
+      }
+    \end{axis}
+  \end{tikzpicture}
+  \caption{Evolution of $g_i$ over each iteration}
+\end{figure}
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.9\textwidth,  % Adjust the width as needed
+      height=10cm,          % Adjust the height as needed
+      xlabel={Iteration},
+      ylabel={$V(x_k)$},     % Update the y-label
+      grid=major,
+      cycle list name=color list,  % Use the built-in color cycle list
+    ]
+      % Define the number of data points
+      \pgfmathtruncatemacro{\numpoints}{5} % Change this to match the number of data points
+      
+      % Use a single addplot command to plot the series with implicit time values
+      \addplot table[x expr=\coordindex, y={V(x_k)}, col sep=comma] {PERSEO/summary.csv};
+
+      \addplot[dotted, purple,  line width=1.5pt, domain=0:100, samples=10] {125};
+      \node[anchor=east] at (axis cs: 0,125) {$V^\infty$};
+    \end{axis}
+  \end{tikzpicture}
+  \caption{$V(x_k)$ Time Series}
+\end{figure}
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.9\textwidth,
+      height=10cm,
+      xlabel={$x$},
+      ylabel={$y$},
+      grid=major,
+      cycle list name=color list,
+    ]
+
+      % Define the number of data points
+      \pgfmathtruncatemacro{\numpoints}{5}
+
+      % Use a single addplot command to plot the time series of points with two coordinates
+      \addplot[only marks] table[x index=0, y index=1, col sep=comma] {PERSEO/RP5.csv}; 
+      \addlegendentry{Data Points}
+
+      \addplot[no markers, dashed] table[x index=0, y index=1, col sep=comma] {PERSEO/RP5.csv}; 
+
+    \end{axis}
+  \end{tikzpicture}
+  \caption{Time Series of Points: $(P_{t_1}, P_{t_2})$}
+\end{figure}
+
+\begin{figure}
+  \centering
+  \begin{tikzpicture}
+    \begin{axis}[
+      width=0.9\textwidth,
+      height=10cm,
+      xlabel={$x$},
+      ylabel={$y$},
+      zlabel={$z$},
+      grid=major,
+      cycle list name=color list,
+      view={45}{45}, % Adjust the view angle
+    ]
+
+      % Use a single addplot3 command to plot the 3D time series of points with three coordinates from "3D_data.csv"
+      \addplot3 [only marks, mark=*, mark size=1pt] table[x expr=\coordindex, y expr=\coordindex, z expr=\coordindex, col sep=comma]{PERSEO/3DRP5.csv};
+      \addlegendentry{Data Points}
+
+    \end{axis}
+  \end{tikzpicture}
+  \caption{3D Time Series of Points: $(x, y, z)$}
+\end{figure}
